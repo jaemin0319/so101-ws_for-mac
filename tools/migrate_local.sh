@@ -2,6 +2,7 @@
 # 이전 맥의 로컬 상태(보정 파일·로컬 설정)를 파일 하나로 묶어 새 맥으로 옮긴다. Git에는 올리지 않는다.
 #
 #   ./tools/migrate_local.sh export [출력.tar.gz]     # 이전 맥: 기본 ~/Downloads/so101_local_bundle_<날짜>.tar.gz
+#   SO101_WS=<예전 작업 폴더> ./tools/migrate_local.sh export   # 이 도구가 없는 예전 폴더에서 꺼낼 때
 #   ./tools/migrate_local.sh import <묶음.tar.gz>      # 새 맥: 저장소 폴더에 풀기(있는 파일은 덮어쓰지 않음)
 #   ./tools/migrate_local.sh import <묶음.tar.gz> --force   # 다른 파일이 있으면 <파일>.bak-<시각>으로 백업 후 교체
 #
@@ -10,7 +11,9 @@
 # 보정 파일은 "같은 물리 팔"에서만 유효하다. 옮긴 뒤 ./01_setup/probe.sh both 로 'match'를 확인한다.
 set -euo pipefail
 S="${BASH_SOURCE[0]}"; while [ -L "$S" ]; do D="$(cd "$(dirname "$S")" && pwd -P)"; S="$(readlink "$S")"; case "$S" in /*) ;; *) S="$D/$S" ;; esac; done
-WS="$(cd "$(dirname "$S")/.." && pwd -P)"
+# SO101_WS=<폴더>: 이 도구가 없는 예전 작업 폴더(예: 원래 so101-ws clone)에서 export할 때 그 폴더를 지정
+WS="${SO101_WS:-$(cd "$(dirname "$S")/.." && pwd -P)}"
+[ -d "$WS" ] || { echo "작업 폴더가 없습니다: $WS"; exit 2; }
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$S"; }
 cmd="${1:-}"
 case "$cmd" in -h|--help|"") usage; [ -n "$cmd" ] && exit 0 || exit 2 ;; esac

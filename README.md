@@ -50,6 +50,8 @@ cd ~/so101-ws_for-mac
 ```bash
 # 이전 맥(기존 작업 폴더에서): ~/Downloads/so101_local_bundle_<날짜>.tar.gz 생성
 ./tools/migrate_local.sh export
+#   예전 폴더에 이 도구가 없으면(예: 원래 so101-ws clone): 이 저장소를 받아서 그 폴더를 지정
+#   SO101_WS=<예전 작업 폴더> ./tools/migrate_local.sh export
 # AirDrop·USB 등으로 새 맥에 옮긴 뒤, 새 맥의 저장소 폴더에서:
 ./tools/migrate_local.sh import ~/Downloads/so101_local_bundle_<날짜>.tar.gz
 ```
