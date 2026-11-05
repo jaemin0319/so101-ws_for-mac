@@ -1,0 +1,15 @@
+# 녹화용 카메라 설정 예시(macOS, 공식 OpenCVCameraConfig 필드).
+# 사용: cp configs/cameras.example.yaml configs/cameras.local.yaml (Git 제외)
+#   1) ./03_dataset/cameras.sh            공식 lerobot-find-cameras로 index·지원 해상도/FPS 확인(확인용 사진 저장)
+#   2) 아래 index_or_path·width·height·fps를 그 결과로 채움
+#   3) ./03_dataset/cameras.sh --test front   실제로 그 카메라가 맞는지 사진·측정 FPS 확인
+# 주의: 카메라 index는 재연결·내장 카메라·iPhone(연속성 카메라) 때문에 바뀔 수 있다. 녹화 세션마다 다시 확인한다.
+#       내장 카메라/iPhone을 자동으로 선택하지 않는다. 여기에 적은 카메라만 녹화한다.
+cameras:
+  front:                      # 카메라 이름 → 데이터셋 키 observation.images.front (영문 소문자/숫자/_)
+    type: opencv              # 공식 OpenCV 카메라(macOS: AVFoundation 백엔드)
+    index_or_path: null       # cameras.sh로 확인한 정수 index(세션마다 확인). null이면 녹화를 거부한다
+    width: 640
+    height: 480
+    fps: 30                   # 녹화 fps(recording.*.yaml dataset.fps)와 같게. 공식 connect가 실제 FPS를 엄격히 검사한다
+    fourcc: null              # 필요 시 "MJPG"(카메라가 지원할 때)

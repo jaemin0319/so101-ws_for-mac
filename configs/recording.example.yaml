@@ -1,0 +1,15 @@
+# 로컬 데이터셋 녹화 설정 예시(공식 lerobot-record 인자로 변환된다).
+# 사용: cp configs/recording.example.yaml configs/recording.local.yaml (Git 제외). 명령행 옵션(--name 등)이 이 값보다 우선한다.
+# 기본값은 첫 현장 시험용(카메라 1대·640×480·30 FPS·20초×2개)이다.
+dataset:
+  name: null                  # 데이터셋 폴더 이름 → <datasets_dir>/<name>, 공식 repo_id = local/<name>. 이미 있으면 거부(이어서는 --resume)
+  task: null                  # 작업 설명(필수, 예: "Pick the red cube and place it in the box"). 공식 meta/tasks.parquet에 저장
+  fps: 30                     # 녹화 루프·영상 fps. 카메라 fps와 같게
+  episode_time_s: 20          # 에피소드 하나의 녹화 시간(초)
+  reset_time_s: 10            # 에피소드 사이 환경 정리 시간(초, 마지막 에피소드 뒤에는 없음). 0 허용
+  num_episodes: 2             # 이번 실행에서 녹화할 에피소드 수(--resume이면 추가로 녹화할 수)
+  manual_advance: false      # true: 스페이스바로 진행(준비→스페이스=녹화 시작, 녹화 중 스페이스=종료·저장 / r=다시, 재설정 후 스페이스=다음). 위 두 시간은 무시
+  max_episode_time_s: 120     # manual_advance일 때 에피소드 안전 상한(초). 스페이스바를 누르지 않아도 이 시간에 종료·저장
+  datasets_dir: null          # null이면 <작업공간>/datasets. 외장 저장소는 이미 있는 절대경로 폴더(자동 생성 안 함)
+  video: true                 # 카메라 영상을 MP4로 저장(공식 기본)
+  vcodec: libsvtav1           # 공식 기본 AV1. 대안: h264, hevc, h264_videotoolbox(맥 하드웨어), auto

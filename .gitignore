@@ -1,0 +1,27 @@
+# 환경·도구·외부 원본
+.venv/
+.venv.broken-*/
+.tools/
+external/
+# 캐시·임시
+.cache/
+.tmp/
+__pycache__/
+*.pyc
+# PC별·실기 산출물
+configs/*.local.yaml
+configs/*.local.yaml.bak-*
+calibration/
+calibration-backup*/
+logs/
+*.tar.gz
+# 데이터셋(로컬 녹화 결과·이관용 manifest/체크섬)
+datasets/
+outputs/
+# macOS
+.DS_Store
+# 비밀정보
+.env
+.env.*
+*.pem
+*.key
