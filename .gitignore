@@ -1,27 +1,19 @@
-# 환경·도구·외부 원본
-.venv/
-.venv.broken-*/
-.tools/
-external/
-# 캐시·임시
-.cache/
-.tmp/
+# Git 에는 스크립트·기본 설정·문서만 올린다. PC·팔마다 다른 것과 큰 파일은 올리지 않는다.
+# 설치 때 생기는 것
+lerobot/
+# 데이터·모델·결과
+data/
+models/
+outputs/
+# 이 PC 설정(scripts/setup_local.sh)과 팔 보정 파일(팔마다 다름 → 다른 맥으로는 scripts/migrate.sh)
+config/so101.local.env
+config/so101.local.env.bak
+calibration/
+# 토큰
+.env
+.git-credentials
+token
+# 기타
 __pycache__/
 *.pyc
-# PC별·실기 산출물
-configs/*.local.yaml
-configs/*.local.yaml.bak-*
-calibration/
-calibration-backup*/
-logs/
-*.tar.gz
-# 데이터셋(로컬 녹화 결과·이관용 manifest/체크섬)
-datasets/
-outputs/
-# macOS
 .DS_Store
-# 비밀정보
-.env
-.env.*
-*.pem
-*.key

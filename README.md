@@ -1,199 +1,257 @@
-# so101-ws_for-mac — SO-101 로봇팔 맥북 작업 환경
+# so101-ws_for-mac
 
-SO-ARM101(SO-101) 리더·팔로워 로봇팔을 **Apple Silicon 맥북**에서 쓰기 위한 작업 환경이다.
-명령 몇 개로 어느 맥북에서나 같은 환경을 만들 수 있다.
+SO-ARM101(SO-101) 모방학습을 **맥북(Apple Silicon) 한 대에서** 처음부터 끝까지 하는 작업 공간.
+보정·카메라 → 텔레옵 → 데이터 녹화/업로드/다운로드 → 학습 → 로봇에서 추론까지 모두 `scripts/` 로 한다.
 
-- **초기 세팅**: 고정 버전 설치, USB 포트 지정, 모터 확인·ID 설정, 보정
-- **텔레옵**: 리더 → 팔로워 추종
-- **데이터셋 녹화**: 카메라 2대 + 관절을 공식 LeRobotDataset으로 저장, 스페이스바 진행, 녹화 중 카메라 창
-- **모델 실행(rollout)**: 학습된 ACT 모델로 팔로워 구동. MPS(기본) 또는 Core ML GPU(선택, 약 30% 빠름), 실행 중 카메라 창·단계별 시간 계측
+## 가장 쉬운 세팅: AI 에이전트에게 맡기기
 
-모터 통신·보정·추종·녹화·데이터 형식·정책 실행은 **공식 [LeRobot](https://github.com/huggingface/lerobot) v0.6.1**(`7e241bd6`)을 그대로 쓴다. 이 저장소에는 공식 코드를 감싸는 것들만 있다: 설치기, 실행 스크립트, 안전 점검, 기록·검증 도구, 문서.
+Claude Code 나 Codex 에 **이 저장소 주소를 붙여 넣고 "이 레포대로 세팅해줘"** 라고만 보낸다.
 
-> **들어 있지 않은 것**
-> - 모델 가중치, 데이터셋, 보정 파일, 개인 설정, Hugging Face 토큰
-> - 가상환경(`.venv`): 설치기가 새로 만든다.
-> - 데이터·모델은 Hugging Face에서 받는다(6·7절). 이전 맥의 보정·설정은 묶음 파일로 옮긴다(3절).
+- 에이전트는 [AGENTS.md](AGENTS.md)를 따라 다음을 한다. Claude Code 는 [CLAUDE.md](CLAUDE.md)가 같은 내용을 불러온다.
+  1. 설치
+  2. 이 PC 값 자동 설정: Hugging Face 계정, 팔 포트, 카메라 번호
+  3. 점검
+- 사람이 직접 하는 일은 세 가지다.
+  - Hugging Face 로그인: 토큰 입력
+  - 팔 보정: 손으로 팔을 움직이는 일
+  - 팔이 움직이는 명령 실행
 
----
+저장소에는 특정 사람의 계정·포트·카메라·보정 값이 없다. 모두 각자의 맥에서 `scripts/setup_local.sh` 가 찾아 `config/so101.local.env` 에 저장한다(Git 에 올라가지 않음).
 
-## 1. 준비물
+## 구성
 
-| 항목 | 조건 |
-|---|---|
-| 맥 | Apple Silicon(M1 이상), **macOS 13 이상**. Intel 맥·Rosetta 터미널은 지원하지 않음 |
-| 개발 도구 | Xcode Command Line Tools(`git`, `swift`): 없으면 `xcode-select --install` |
-| 디스크 | 여유 약 6 GB(설치물 약 3 GB + 캐시) |
-| 네트워크 | 처음 설치할 때만 필요(uv·Python·패키지·LeRobot 원본을 고정 버전·해시로 받음) |
-| 로봇 | SO-101 리더·팔로워, 모터 보드 2개(USB), 각 팔 전원 어댑터. 녹화·모델 실행에는 USB 카메라 2대(front·wrist) |
+- **LeRobot**: GitHub `huggingface/lerobot` 을 `lerobot/` 에 clone 해 editable 설치한다. 검증한 커밋 `d490e472`(0.7.1, 2026-11-05)로 고정.
+- **conda 환경 `so-arm_ws`**: Python 3.12.16, torch 2.15.0(Apple GPU = `mps`), torchcodec 0.17.0, ffmpeg 9.0.2, bash 5
+- **패키지 버전**: `requirements/constraints.txt` 로 고정
+- **대상**: macOS 14 이상, Apple Silicon(M1~)
+  - `install.sh` 는 Ubuntu 24.04 도 감지한다(원본 so-arm101_ws 동작). 이 저장소에서 확인한 것은 macOS 다.
 
-설치기는 Homebrew·conda·시스템 Python·셸 설정(`~/.zshrc`)을 **바꾸지 않는다**. 모든 것이 이 폴더 안(`.tools/`, `.venv/`, `.cache/`)에 설치된다.
+## 직접 세팅하기
 
-## 2. 설치(처음 한 번, 약 5~10분)
+### 1) 설치 (처음 한 번, 약 2~10분)
 
 ```bash
-git clone https://github.com/<user>/so101-ws_for-mac.git ~/so101-ws_for-mac
+xcode-select --install                                                 # git 이 없을 때만
+git clone https://github.com/<user>/so101-ws_for-mac.git ~/so101-ws_for-mac   # <user> = 이 저장소를 올린 GitHub 계정
+bash ~/so101-ws_for-mac/scripts/install.sh
+```
+
+- conda 가 없으면 Miniforge 를 `~/miniforge3` 에 설치한다. 버전을 고정하고 sha256 을 확인한다.
+- `~/.zshrc` 는 고치지 않는다(`conda init` 안 함).
+- 다시 실행해도 안전하다(있는 것은 건너뛴다).
+
+### 2) 이 PC 에 맞게 자동 설정
+
+두 팔의 USB 와 전원(follower 12V, leader 5V), 카메라 2대를 연결한 뒤 실행한다.
+
+```bash
 cd ~/so101-ws_for-mac
-./01_setup/install.sh        # uv·Python 3.12.15·LeRobot 0.6.1·torch 2.11.0 등을 고정 버전으로 설치
-./01_setup/doctor.sh         # 소프트웨어 점검: FAIL 0이면 정상(WARN은 안내만)
+bash scripts/hub.sh login                 # Hugging Face 로그인(토큰 입력, 한 번). 업로드할 때 필요
+bash scripts/setup_local.sh               # 계정·팔 포트 자동 저장 → config/so101.local.env
+source scripts/activate.sh
+python scripts/cameras.py snap --all      # 카메라 번호마다 사진 1장 → outputs/cameras/index<N>_*.jpg
+bash scripts/setup_local.sh --front 1 --wrist 0   # 사진을 보고 front(작업면)·wrist(그리퍼) 번호 저장
 ```
 
-- `<user>`는 이 저장소를 올린 GitHub 계정이다. 비공개 저장소라면 접근 권한이 있는 계정으로 로그인해야 clone할 수 있다.
-- 다른 폴더에 clone해도 된다. 스크립트는 경로를 하드코딩하지 않는다.
-- 설치기를 다시 실행해도 안전하다(이미 맞으면 재사용). 꼬였다고 의심되면 `./01_setup/install.sh --repair`를 실행한다.
-- 이 README의 명령은 **저장소 폴더 안**에서 실행한다고 가정한다.
+- **계정**: 로그인한 Hugging Face 계정을 `HF_USER` 로 저장한다. 데이터셋·모델 이름 앞에 붙는다.
+- **팔 포트**
+  - 각 보드의 모터 전압을 **읽기만** 해서 follower(약 12V)와 leader(약 5~6V)를 구분한다. 모터는 움직이지 않는다.
+  - 맥에서 포트 이름은 `/dev/cu.usbmodem<보드 시리얼>` 이다.
+  - 전원이 꺼져 있으면 구분하지 못한다. 그때는 `lerobot-find-port` 로 하나씩 찾아 `--follower <포트> --leader <포트>` 로 지정한다.
+- **카메라**
+  - macOS 는 카메라를 **번호**(0, 1, ...)로 연다.
+  - 같은 모델 카메라 2대는 이름으로 구분되지 않는다.
+  - 번호는 재연결·재부팅 뒤 바뀔 수 있다. 녹화·추론 전에 `python scripts/cameras.py snap` 으로 확인한다.
+- 처음 카메라를 열 때 macOS 가 터미널(또는 VS Code)의 카메라 권한을 묻는다. 허용한다.
+- 끝에 **"남은 일"** 이 나오면 그대로 따른다.
 
-## 3. 이전 맥에서 옮겨 오는 경우(같은 로봇팔)
-
-보정 파일과 로컬 설정(포트·팔 이름·카메라·녹화 조건)은 Git에 없다. 묶음 파일 하나로 옮긴다.
+### 3) 보정 (팔마다 한 번, 직접)
 
 ```bash
-# 이전 맥(기존 작업 폴더에서): ~/Downloads/so101_local_bundle_<날짜>.tar.gz 생성
-./tools/migrate_local.sh export
-#   예전 폴더에 이 도구가 없으면(예: 원래 so101-ws clone): 이 저장소를 받아서 그 폴더를 지정
-#   SO101_WS=<예전 작업 폴더> ./tools/migrate_local.sh export
-# AirDrop·USB 등으로 새 맥에 옮긴 뒤, 새 맥의 저장소 폴더에서:
-./tools/migrate_local.sh import ~/Downloads/so101_local_bundle_<날짜>.tar.gz
+bash scripts/calibrate.sh follower     # → calibration/robots/so_follower/so101_follower.json
+bash scripts/calibrate.sh leader       # → calibration/teleoperators/so_leader/so101_leader.json
+bash scripts/check_devices.sh          # 포트·카메라·보정 파일 확인(장치를 열지 않음) → FAIL 0
 ```
 
-- **묶음에 들어가는 것**: `calibration/*.json`, `configs/*.local.yaml`
-- **들어가지 않는 것**: 모델, 데이터셋, 로그, 토큰
-- import는 기존 파일을 덮어쓰지 않는다. 바꾸려면 `--force`를 붙인다. 그러면 기존 파일을 백업한 뒤 교체한다.
-- 가져온 뒤 확인할 것:
-  - 포트 이름: `./01_setup/ports.sh`
-  - 카메라 번호(맥·허브마다 다름): `./03_dataset/cameras.sh`
-  - 보정 일치: `./01_setup/probe.sh both`
+- 진행은 LeRobot 안내를 따른다.
+  1. 모든 관절을 가운데 자세에 두고 Enter
+  2. wrist_roll 을 뺀 관절을 끝에서 끝까지 움직이고 Enter
+- 기존 보정 파일이 있으면 LeRobot 이 묻는다. **Enter = 기존 파일 사용**, `c` + Enter = 새로 보정. 이전 파일은 `calibration/backup/` 에 백업된다.
+- 새로 조립한 팔(모터 ID 미설정)은 먼저 `bash scripts/setup_motors.sh follower|leader` 를 실행한다.
 
-이전 맥이 없거나 새 로봇이면 4절부터 하면 된다.
-
-## 4. 로봇 첫 세팅(새 로봇 또는 보정이 없을 때)
+**다른 맥에서 쓰던 같은 팔**이면 보정과 설정을 묶음 파일 하나로 옮길 수 있다.
 
 ```bash
-./01_setup/ports.sh                 # USB 연결 전후 비교로 리더·팔로워 포트를 찾아 configs/robot.local.yaml에 저장
-./01_setup/doctor.sh --hardware     # 포트·권한 점검(보정 전이면 '보정 파일 없음' WARN은 정상)
-./01_setup/probe.sh follower        # 읽기 전용: 모터 6/6 응답·모델·펌웨어·보정 상태
-./01_setup/probe.sh leader
-./01_setup/motors.sh follower       # (6/6이 아니고 ID가 비어 있을 때만) 공식 setup-motors: 모터를 하나씩 연결
-./01_setup/calibrate.sh follower    # 공식 보정(팔로워는 손으로 받친 채로)
-./01_setup/calibrate.sh leader
-./01_setup/probe.sh both            # 양팔 '보정 파일 상태: match' 확인
+bash scripts/migrate.sh export                        # 예전 맥: ~/Downloads/so101_local_bundle_<날짜>.tar.gz
+bash scripts/migrate.sh import ~/Downloads/so101_local_bundle_<날짜>.tar.gz   # 새 맥
+bash scripts/setup_local.sh                           # 새 맥에서 포트·카메라 번호 다시 확인
 ```
 
-- **보정 순서**
-  1. 기존 파일을 쓸지 묻는 프롬프트가 나오면 **`c` + Enter**를 누른다(그냥 Enter는 예전 파일을 그대로 씀).
-  2. 모든 관절을 가동 범위 **가운데**에 두고 Enter를 누른다.
-  3. wrist_roll을 뺀 관절을 양쪽 끝까지 천천히 움직이고 Enter를 누른다.
-- 모터를 움직이거나 모터에 쓰는 명령(`motors`, `calibrate`, `run`, `record`, rollout)은 **사람이 로봇 옆에서 직접** 실행한다.
-
-## 5. 텔레옵(리더 → 팔로워)
+## 새 터미널마다
 
 ```bash
-./02_teleop/run.sh --dry-run       # 명령·설정만 확인(포트를 열지 않음)
-./02_teleop/run.sh --time-s 30     # 30초 시험
-./02_teleop/run.sh                 # 시간 제한 없음. 시작 자세 확인 후 Enter
+source ~/so101-ws_for-mac/scripts/activate.sh     # conda 환경 + 설정 불러오기 (zsh·bash 모두)
+cd ~/so101-ws_for-mac
 ```
 
-**종료 순서**
-1. 리더를 쉬는 자세로 둔다.
-2. 팔로워를 받친다.
-3. `Ctrl+C`를 누른다.
+- `scripts/*.sh` 는 이 과정을 알아서 하므로 생략해도 된다. `lerobot-*` 명령이나 `python scripts/*.py` 를 직접 쓸 때는 필요하다.
+- 모든 `.sh` 가 지원하는 옵션
+  - `--help`
+  - `--dry-run`: 명령만 출력
+  - `--check`: 장치를 열지 않고 LeRobot 이 해석한 설정만 출력
+  - `--` 뒤의 인자는 lerobot 명령에 그대로 넘긴다.
 
-종료 요약에 양팔 토크 해제 '성공'이 나오는지 본다. 응답이 없으면 팔로워 전원을 뽑는다.
+## 폴더
 
-## 6. 카메라·데이터셋 녹화
+```
+so101-ws_for-mac/
+├── config/so101.env          ← 공용 기본값(카메라 해상도·저장 위치·녹화/학습 기본값)
+├── config/so101.local.env    ← (git 제외) 이 PC 값: HF_USER, 팔 포트, 카메라 번호 — setup_local.sh 가 만듦
+├── calibration/              ← (git 제외) 팔 보정 파일
+├── scripts/                  ← 모든 작업 스크립트
+├── requirements/             ← 고정 패키지 버전
+├── lerobot/                  ← (설치 때 생성) LeRobot 소스
+├── data/                     ← (git 제외) 데이터셋. 녹화: data/<HF_USER>/<name>, 허브에서 받은 것: data/hub/
+├── models/                   ← (git 제외) 허브에서 받은 모델: models/<repo 이름>/
+└── outputs/                  ← (git 제외) 학습 결과 outputs/train/<job>/, 카메라 사진 outputs/cameras/
+```
+
+## 카메라
 
 ```bash
-./03_dataset/cameras.sh                                   # 카메라 번호 확인 → configs/cameras.local.yaml (front·wrist 640×480 30fps)
-./03_dataset/record.sh --name <이름> --task "<작업 문장>" --episodes 10 --view   # 새 데이터셋, 카메라 창과 함께
-./03_dataset/record.sh --resume --name <이름> --task "<같은 문장>" --episodes 10 --view   # 이어서 10개 추가
-./03_dataset/inspect.sh datasets/<이름>                    # 검사(녹화 후에는 이번에 저장한 에피소드만 자동 검사)
+python scripts/cameras.py list         # 열리는 카메라 번호와 front/wrist 대응
+python scripts/cameras.py snap         # front/wrist 한 장씩 → outputs/cameras/
+python scripts/cameras.py snap --all   # 열리는 모든 번호 한 장씩(어느 번호가 front/wrist 인지 찾기)
+python scripts/cameras.py live         # 실시간 창(front | wrist). s = 저장, q = 종료
+python scripts/cameras.py live --overlay <HF_USER>/<학습 데이터셋>
+                                       # 학습 데이터의 front 화면을 반투명으로 겹쳐(o 로 켜고 끔) 카메라 위치를 학습 때와 맞춘다
 ```
 
-- **스페이스바 진행**(`configs/recording.local.yaml`의 `manual_advance: true`)
-  1. 스페이스 → 녹화 시작
-  2. 스페이스 → 저장, `r` → 버림
-  3. 환경 재설정 후 스페이스 → 다음 녹화
-  4. `q` → 종료
-- **카메라 창**: `--view`는 녹화 프로세스가 읽은 영상을 보여 준다(카메라를 다시 열지 않음). `--mirror`는 다른 터미널에서 `swift tools/camera_view_dual.swift --mirror .tmp/live --no-focus`로 띄울 때 쓴다.
-- 녹화 중에 `--mirror` 없이 카메라 앱·창을 열면 녹화 카메라가 멈춘다.
+- 설정: 640×480, 30fps, front 180° 회전(`config/so101.env`).
+- macOS 는 MJPG 지정을 지원하지 않아 쓰지 않는다.
+- 카메라는 한 프로그램만 열 수 있다. 창을 닫고 teleop/record/rollout 을 실행한다.
 
-**Hugging Face 업로드·다운로드**
-- 먼저 `.venv/bin/hf auth login`으로 로그인한다. 토큰은 작업 폴더 `.cache/huggingface/`에만 저장되며 Git에 올라가지 않는다.
-- 업로드 절차는 [docs/DATASET.md](docs/DATASET.md)에 있다.
+## 텔레옵 (leader → follower)
 
-## 7. 모델 실행(rollout)
-
-**모델 받기**(예: ACT 체크포인트, `<HF 사용자>/<모델 repo>`):
 ```bash
-.venv/bin/hf download <HF 사용자>/<모델 repo> --include "checkpoints/100000/pretrained_model/*" \
-  --local-dir .cache/models/<모델 repo>
+bash scripts/teleop.sh                 # 팔만
+bash scripts/teleop.sh --display       # 카메라까지 열고 Rerun 창에 영상·관절값 표시
 ```
 
-**실행**: 포트·카메라 번호·task 문장은 본인 값으로 바꾼다. 포트는 `configs/robot.local.yaml`에 있다. task는 녹화 때 쓴 문장과 같아야 한다.
+Ctrl+C 로 멈추면 follower 토크가 꺼져 팔이 힘없이 내려온다. **손으로 받친다.**
+
+## 데이터셋 만들기·올리기·받기
+
 ```bash
-./tools/rollout_with_view.sh --no-view \
---strategy.type=base \
---policy.path="$PWD/.cache/models/<모델 repo>/checkpoints/100000/pretrained_model" \
---policy.n_action_steps=1 \
---policy.temporal_ensemble_coeff=0.01 \
---device=mps \
---robot.type=so101_follower \
---robot.port=/dev/cu.usbmodem<팔로워> \
---robot.id=so101_follower \
---robot.disable_torque_on_disconnect=true \
-'--robot.max_relative_target={"shoulder_pan":15.0,"shoulder_lift":35.0,"elbow_flex":30.0,"wrist_flex":20.0,"wrist_roll":10.0,"gripper":25.0}' \
-'--robot.cameras={"front":{"type":"opencv","index_or_path":1,"width":640,"height":480,"fps":30,"rotation":180},"wrist":{"type":"opencv","index_or_path":0,"width":640,"height":480,"fps":30}}' \
-'--task=<녹화 때 쓴 작업 문장>' \
---fps=30 --play_sounds=false
+# 녹화 (로컬 data/<HF_USER>/ball_to_bowl 에 저장)
+bash scripts/record.sh --name ball_to_bowl --task "Pick up the ball and place it in the bowl" --episodes 20
+# 같은 데이터셋에 10개 더
+bash scripts/record.sh --name ball_to_bowl --task "Pick up the ball and place it in the bowl" --episodes 10 --resume
+# 녹화 옵션: --episode-time 30 --reset-time 10 --display --push(끝나면 업로드) --private
+
+bash scripts/replay.sh --dataset ball_to_bowl --episode 0          # follower 로 다시 재생
+bash scripts/hub.sh upload-dataset ball_to_bowl [--private]        # 허브에 올리기
+bash scripts/hub.sh download-dataset <사용자>/<데이터셋> [--revision <commit>]   # 허브에서 받기 → data/hub/
+bash scripts/hub.sh list                                           # 로컬 데이터셋·모델 목록
 ```
 
-- **정책 설정 줄**
-  - `--policy.n_action_steps=1`, `--policy.temporal_ensemble_coeff=0.01`: 매 스텝 추론 + 시간 앙상블.
-  - 이 두 줄을 빼면 모델 기본값(100스텝 묶음)으로 돈다.
-- **Core ML(선택, 같은 가중치·같은 결과, 추론 약 30% 빠름)**
-  1. 처음 한 번 `.venv/bin/python tools/act_coreml_export.py --checkpoint <pretrained_model 경로>`로 변환한다.
-  2. 첫 줄에 `--backend=coreml`을 넣고, `--device=mps`를 `--device=cpu`로 바꾼다.
-- **래퍼 옵션**(첫 줄): `--no-view`(창 없이, 다른 터미널에서 `swift tools/camera_view_dual.swift --mirror .tmp/live`), `--timing` / `--timing=light`(단계별 시간 → `logs/rollout-timing-*.json`), `--no-mirror`
-- 시작 확인 없이 바로 움직인다. 팔로워를 받칠 수 있게 두고, 이상하면 `Ctrl+C` 또는 전원 차단을 한다.
-- 실행 중에는 `swift tools/camera_view_dual.swift`(`--mirror` 없이)를 띄우지 않는다. 카메라를 다시 열면 rollout 입력이 멈춘다.
+- **녹화 중 키**: 터미널이 포커스된 상태에서 누른다.
+  - **n**(또는 →) = 이번 에피소드 끝내고 다음
+  - **r**(또는 ←) = 다시
+  - **q**(또는 ESC) = 종료
+  - 터미널에 입력 모니터링 권한이 없으면 화살표·ESC 는 안 먹고 n/r/q 만 된다(LeRobot 이 자동 전환).
+- 이름에 `/` 가 없으면 `HF_USER` 가 앞에 붙는다. `HF_USER` 가 비어 있으면 로그인 계정을 쓴다.
+- 녹화 기본값(fps 30, 에피소드 30초, 정리 10초)은 `config/so101.env` 의 `SO101_RECORD_*` 다.
+- 녹화·추론·텔레옵·학습 중에는 맥이 잠자기에 들어가지 않는다(`caffeinate`).
 
-## 8. 자주 겪는 문제
+## 학습
 
-| 증상 | 원인·조치 |
+```bash
+bash scripts/train.sh --dataset ball_to_bowl --job act_ball                  # ACT, 100k step, batch 8 (장치 자동: mps)
+bash scripts/train.sh --dataset ball_to_bowl --job act_ball --push act_ball  # 끝나면 허브 업로드
+bash scripts/train.sh --job act_ball --resume                                # 끊긴 학습 이어서
+bash scripts/train.sh --dataset ball_to_bowl --job act_ft --from models/<모델>/checkpoints/100000/pretrained_model   # fine-tune
+bash scripts/train.sh ... -- --policy.chunk_size=50 --num_workers=4          # lerobot-train 인자 직접 추가
+
+bash scripts/hub.sh upload-model act_ball <HF_USER>/act_ball [--private]     # 학습 결과(last) 업로드
+bash scripts/hub.sh download-model <사용자>/<모델> --step 100000             # 모델 받기 → models/
+```
+
+- 결과는 `outputs/train/<job>/checkpoints/<step>/pretrained_model` 에 저장된다. 마지막은 `checkpoints/last`.
+- **맥 학습 속도**
+  - Apple GPU(MPS)는 느리다. M4 MacBook Air 기준 ACT batch 8 이 약 1.35 s/step 이다.
+  - 그래서 10만 스텝 학습은 NVIDIA GPU PC 를 권장한다. 맥은 짧은 시험이나 fine-tune 에 쓴다.
+- `download-model` 은 optimizer 상태를 받지 않는다. 이어서 학습할 거면 `--with-optimizer` 를 붙인다.
+
+## 추론 (로봇에서 정책 실행)
+
+```bash
+# 로봇 없이 먼저 점검: 데이터셋 에피소드를 넣어 예측 action 을 정답과 비교 + 추론 시간
+python scripts/check_policy.py --policy act_ball --dataset ball_to_bowl
+
+# 로봇에서 실행 (Ctrl+C 로 종료 → 팔이 시작 자세로 천천히 돌아간다)
+bash scripts/rollout.sh --policy act_ball                         # 학습한 모델 (outputs/train/act_ball)
+bash scripts/rollout.sh --policy <모델 폴더 이름> --step 100000   # 받은 모델 (models/...)
+bash scripts/rollout.sh --policy <사용자>/<모델> --step 100000    # 허브 repo → models/ 로 받은 뒤 실행
+```
+
+| 옵션 | 뜻 |
 |---|---|
-| probe에서 모터 **0/6** | 거의 항상 모터 전원(어댑터·멀티탭·DC 잭)이 원인이다. 보드 점퍼(`B`)·3핀 케이블도 확인한다. 펌웨어 초기화는 하지 않는다 |
-| 보정 파일 **mismatch** | 다른 컴퓨터에서 다시 보정했거나 다른 팔의 파일이다. 그 컴퓨터의 파일을 가져오거나 `./01_setup/calibrate.sh`로 다시 보정한다(`c` 입력) |
-| 카메라 열기 실패·번호가 바뀜 | 허브를 다시 꽂으면 번호가 바뀐다. `./03_dataset/cameras.sh`로 확인하고 설정·명령의 `index_or_path`를 고친다 |
-| 명령이 중간에 끊김(zsh) | 줄 끝 `\` 뒤에 공백이 있거나, 명령 안에 `#` 주석이 들어간 경우다 |
-| `Record loop is running slower` 경고 | 구간이 바뀔 때 한두 번 나오는 것은 정상이다. 계속 나오면 다른 앱을 닫는다. rollout은 맥에서 30 Hz가 어렵다(약 13~19 Hz, docs의 성능 보고서 참고) |
-| 카메라 권한 창 | 시스템 설정 → 개인정보 보호 및 보안 → 카메라에서 터미널/VS Code를 허용한다 |
+| `--n-action-steps 20` | ACT 는 한 번에 100개(chunk)를 예측한다. 그중 N 개를 실행한 뒤 다시 추론한다(기본 100) |
+| `--ensemble [0.01]` | 매 프레임 추론 + 겹치는 예측 가중 평균. 부드럽지만 맥에서는 추론이 무거워진다(M4 MPS 약 66 ms/프레임) |
+| `--duration 60` | 60초 뒤 종료(기본 0 = 무제한) |
+| `--task "..."` | 작업 문장. 비우면 학습 데이터셋에서 찾는다(ACT 는 무시) |
+| `--record NAME --episodes 10` | 실행을 데이터셋 `<HF_USER>/rollout_NAME` 으로 기록 |
+| `--display` | Rerun 창에 카메라·관절값·action 표시 |
+| `--cpu` | MPS 대신 CPU |
+| `--check` | 로봇을 열지 않고 해석된 설정만 출력 |
 
-## 9. 폴더와 문서
+## 스크립트
 
-| 경로 | 내용 |
+| 스크립트 | 하는 일 |
 |---|---|
-| `01_setup/`, `02_teleop/`, `03_dataset/` | 단계별 실행 스크립트(공통 CLI `scripts/so101` 호출, 모두 `--help` 지원) |
-| `scripts/` | 설치기(`install_macos.sh`), 공통 래퍼(`so101.py`), 런처·훅(녹화 스페이스바·카메라 미러·rollout 계측·Core ML) |
-| `tools/` | rollout 래퍼, 카메라 창(Swift), Core ML 변환·비교, 로컬 상태 이관, 오프라인 검증(`verify_offline.py`, `verify_dataset.py`) |
-| `configs/*.example.yaml` | 설정 견본. 실제 값은 `*.local.yaml`(Git 제외, 스크립트가 만들거나 묶음으로 가져옴) |
-| `lock/macos-arm64/` | macOS 고정 의존성(uv.lock, 해시 포함). `lock/`의 나머지는 Ubuntu용 |
-| 매뉴얼 | [docs/SETUP.md](docs/SETUP.md) · [docs/TELEOP.md](docs/TELEOP.md) · [docs/DATASET.md](docs/DATASET.md) · [docs/HARDWARE.md](docs/HARDWARE.md) · [docs/PROJECT_MAP.md](docs/PROJECT_MAP.md) |
-| 성능·검증 기록 | [docs/ACT_INFERENCE_OPTIMIZATION_REPORT.md](docs/ACT_INFERENCE_OPTIMIZATION_REPORT.md), [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) 등. 원래 맥에서의 기록이며 경로·이름은 `user`로 일반화했다 |
-| 작업 규칙 | [AGENTS.md](AGENTS.md)(AI 에이전트·작업자용 안전 규칙) |
+| `install.sh` | 설치(Miniforge·conda 환경·LeRobot·패키지) |
+| `setup_local.sh` | 이 PC 값(계정·팔 포트·카메라 번호) 저장 → `config/so101.local.env` |
+| `find_arms.py` | 팔 포트 찾기 + 모터 전압으로 follower/leader 구분(읽기 전용) |
+| `migrate.sh` | 보정·이 PC 설정을 다른 맥으로 옮기기 |
+| `activate.sh` | (source) conda 환경 + 설정 |
+| `check_env.py` / `check_devices.sh` | 소프트웨어·GPU 점검 / 포트·카메라·보정 점검 |
+| `cameras.py` | 카메라 번호·사진·실시간 창·학습 화면 겹치기 |
+| `calibrate.sh` / `setup_motors.sh` | 보정 / 모터 ID 설정 |
+| `teleop.sh` | leader → follower |
+| `record.sh` / `replay.sh` | 데이터 녹화 / 재생 |
+| `hub.sh` | 로그인, 데이터셋·모델 받기/올리기, 로컬 목록 |
+| `train.sh` | 학습(새로, 이어서, fine-tune) |
+| `check_policy.py` | 로봇 없이 정책 점검 |
+| `rollout.sh` | 로봇에서 정책 실행(+ 기록) |
 
-**로봇 없이 소프트웨어 검증**
-- `.venv/bin/python tools/verify_offline.py`: 가짜 서보로 래퍼·훅·안전 동작을 시험한다.
-- `.venv/bin/python tools/verify_dataset.py`: 합성 데이터셋을 만들어 검사한다.
+## 문제 해결
 
-## 10. 고정 버전
-
-| 항목 | 값 |
+| 증상 | 해결 |
 |---|---|
-| uv | 0.12.23 (공식 sha256 검증) |
-| Python | 3.12.15 (uv 관리, 작업 폴더 `.tools/python`에만 설치) |
-| LeRobot | 0.6.1 `lerobot[feetech,dataset]` (원본 커밋 `7e241bd630a3719a56157a497ce5d08f244784f1`) |
-| PyTorch | torch 2.11.0, torchvision 0.26.0 (PyPI macOS arm64, MPS) |
-| Core ML | coremltools 9.0 (선택 backend용) |
-| 잠금 | `lock/macos-arm64/uv.lock` 71개 패키지. 공식 LeRobot lock과 공통 67개는 버전·해시가 같다 |
+| `conda: command not found` | `source ~/so101-ws_for-mac/scripts/activate.sh` (conda init 없이 동작) |
+| `설정 비어 있음` / `설정되지 않았다` | `bash scripts/setup_local.sh` (팔·카메라 연결 후) |
+| 팔 포트를 못 찾음 | USB·전원 확인 → `ls /dev/cu.usbmodem*` → `bash scripts/setup_local.sh --redetect` |
+| follower/leader 구분 실패 | 두 팔 전원이 모두 켜졌는지 확인. 안 되면 `lerobot-find-port` → `--follower`/`--leader` 로 지정 |
+| front/wrist 화면이 바뀜 | 카메라 번호가 바뀐 것. `python scripts/cameras.py snap --all` → `setup_local.sh --front N --wrist M` |
+| 카메라가 하나도 안 열림 | 시스템 설정 → 개인정보 보호 및 보안 → 카메라에서 터미널·VS Code 허용 |
+| `Failed to open OpenCVCamera` | 다른 프로그램(카메라 창·화상회의)이 카메라를 쓰는 중 |
+| 녹화 중 화살표 키가 안 먹음 | 터미널에서 n / r / q 를 쓴다 |
+| `bash 4 이상이 필요하다` | `bash scripts/install.sh` 를 다시 실행(conda 환경에 bash 5 설치) |
+| `Hugging Face 사용자 이름을 모른다` | `bash scripts/hub.sh login` → `bash scripts/setup_local.sh` |
+| `Mismatch between calibration values ...` | 모터에 저장된 값과 보정 파일이 다르다(다른 PC에서 다시 보정한 경우 등). Enter 를 누르면 파일 값을 모터에 쓴다. 의심되면 다시 보정 |
+| `Record loop is running slower (29.8 Hz)` | 한 바퀴가 33.3 ms 를 조금 넘은 것. 가끔이면 무시 |
+| 모델 동작이 조금씩 빗나감 | `cameras.py live --overlay <학습 데이터셋>` 으로 카메라 위치를 학습 때와 맞춘다. 보정 차이도 의심 |
+| 시작할 때 `objc[...]: Class AVFFrameReceiver is implemented in both ...` | FFmpeg 라이브러리가 여러 패키지에 들어 있어 나오는 macOS 경고. 동작에는 영향이 없었다 |
 
-라이선스: 공식 LeRobot·SO-ARM100은 Apache-2.0이다([docs/REFERENCES.md](docs/REFERENCES.md)).
+## 참고
+
+- 원본: [so-arm101_ws](https://github.com/<user>/so-arm101_ws)(Ubuntu 24.04 용)를 macOS 용으로 옮겼다.
+  - macOS 분기: 설치·포트·카메라 번호·MPS·zsh·bash 5·caffeinate
+  - 추가: PC 값 자동 설정(`setup_local.sh`)
+- LeRobot 0.6.1 로 만든 데이터셋(v3.0)·ACT 모델은 0.7.1 에서 그대로 로드·추론된다.
+- LeRobot 0.7 에서 바뀐 점
+  - Feetech 모터 드라이버가 rustypot 으로 바뀌었다(보정 파일 형식은 같음).
+  - 학습 로그 도구가 wandb 에서 trackio 로 바뀌었다.
+  - `lerobot-record` 는 이름 뒤에 날짜를 붙인다(`record.sh` 는 이름 그대로 저장).
+  - 허브 데이터셋은 `data/hub/` 리비전 캐시에 저장된다.

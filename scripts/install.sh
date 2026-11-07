@@ -1,213 +1,172 @@
 #!/usr/bin/env bash
-# SO-101 환경 설치기.
-#   scripts/install.sh            고정 버전 설치. 다시 실행하면 정상 환경을 재사용하고 누락·부분 설치를 복구한다.
-#   scripts/install.sh --repair   lock에 있는 모든 패키지를 캐시 없이 다시 받아 설치한다(파일 손상 의심 시).
-#   scripts/install.sh --reset-venv
-#                                 Python이 3.12가 아닌 등 재사용할 수 없는 .venv를 .venv.broken-<시각>으로 옮기고 새로 만든다(삭제하지 않음).
-#   scripts/install.sh --relock   [유지보수용] lock/pyproject.toml로 lock/uv.lock을 다시 해결하고 점검한 뒤 설치한다.
+# so101-ws_for-mac 설치 (macOS 14+ Apple Silicon / Ubuntu 24.04 x86_64). 여러 번 실행해도 안전하다. 보통 5~10분(인터넷 속도에 따라).
 #
-# 설치 기준: lock/lerobot.env(LeRobot 태그·SHA, Python minor, uv 버전·체크섬) + lock/pyproject.toml + lock/uv.lock.
-# 일반 설치는 `uv sync --locked`만 실행하며 lock을 재해결하지 않는다.
-# 모든 다운로드·캐시·임시 파일은 작업공간 안(.cache/, .tmp/)에 둔다.
+#   bash scripts/install.sh                # 기본
+#   bash scripts/install.sh --dialout      # + 시리얼 포트 권한(sudo usermod -aG dialout). 이후 재로그인 필요
+#   bash scripts/install.sh --torch cu128  # torch 빌드 강제(auto | cu13 | cu128). macOS 는 항상 mps
+#   bash scripts/install.sh --env-name X   # conda 환경 이름(기본: config/so101.env 의 SO101_ENV_NAME = so-arm_ws)
+#   bash scripts/install.sh --lerobot-ref main   # LeRobot 을 다른 커밋/브랜치로(기본은 검증한 고정 커밋)
+#
+# 하는 일
+#   1) conda 가 없으면 Miniforge 를 ~/miniforge3 에 설치(~/.bashrc 는 고치지 않음)
+#   2) NVIDIA 드라이버를 보고 torch 빌드 선택
+#        드라이버 >= 580.65 또는 GPU 없음 → torch 2.15.0 (PyPI, CUDA 13)   + ffmpeg 9.0.2
+#        드라이버 <  580.65              → torch 2.11.0 (cu128 인덱스)     + ffmpeg 8.1.1
+#        macOS(Apple Silicon)            → torch 2.15.0 (PyPI, MPS 내장)    + ffmpeg 9.0.2 (+ bash 5: macOS 기본 bash 3.2 대신)
+#   3) conda 환경: python 3.12.16 + ffmpeg (conda-forge)
+#   4) lerobot/ 에 GitHub huggingface/lerobot 클론 후 고정 커밋으로 체크아웃
+#   5) uv 로 torch + lerobot(editable) + 고정 버전(requirements/constraints.txt) 설치
+#   6) import 한 번으로 간단 확인
 set -euo pipefail
+unset PYTHONPATH   # ROS 등 시스템 파이썬 경로가 섞이지 않게
 
-WS="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd -P)"
-cd "$WS"
+WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LEROBOT_URL="https://github.com/huggingface/lerobot.git"
+LEROBOT_COMMIT="d490e472a5d1a207cfe0255caaaf74b6d66e4656"   # LeRobot 0.7.1 (2026-11-05)
+EXTRAS="core_scripts,training,feetech,smolvla,diffusion"
+PYTHON_VER="3.12.16"
+UV_VER="0.13.7"
 
-# ---- 실행 환경 격리(첫 다운로드 전에 적용) ----
-unset PYTHONPATH PYTHONHOME LD_LIBRARY_PATH VIRTUAL_ENV CONDA_PREFIX || true
-export PYTHONNOUSERSITE=1
-export TMPDIR="$WS/.tmp"
-export UV_CACHE_DIR="${SO101_UV_CACHE_DIR:-$WS/.cache/uv}"
-export UV_PYTHON_DOWNLOADS=never
-export UV_PYTHON_PREFERENCE=only-system
-export UV_PROJECT_ENVIRONMENT="$WS/.venv"
-# venv 파일을 캐시와 하드링크로 공유하지 않는다(설치본 손상이 캐시로 번지지 않게, --repair가 깨끗한 파일을 받게).
-export UV_LINK_MODE=copy
+ENV_NAME=""
+[ -f "$WS/config/so101.local.env" ] && ENV_NAME="$(sed -n 's/^SO101_ENV_NAME=//p' "$WS/config/so101.local.env" | tail -1)"
+[ -n "$ENV_NAME" ] || ENV_NAME="$(sed -n 's/^SO101_ENV_NAME=//p' "$WS/config/so101.env")"; ENV_NAME="${ENV_NAME:-so-arm_ws}"
+TORCH="auto"; DIALOUT=0; REF=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dialout) DIALOUT=1; shift ;;
+        --torch) TORCH="$2"; shift 2 ;;
+        --env-name) ENV_NAME="$2"; shift 2 ;;
+        --lerobot-ref) REF="$2"; shift 2 ;;
+        -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
+        *) echo "알 수 없는 옵션: $1 (--help)" >&2; exit 1 ;;
+    esac
+done
+
+say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m[경고]\033[0m %s\n' "$*" >&2; }
+
+OS="$(uname -s)"
+if [ "$OS" = "Darwin" ]; then
+    [ "$(uname -m)" = "arm64" ] || { echo "macOS 는 Apple Silicon(arm64)만 지원한다 (현재 $(uname -m))" >&2; exit 1; }
+    [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ] && { echo "Rosetta 터미널이다. 네이티브 터미널에서 실행한다." >&2; exit 1; }
+    macv="$(sw_vers -productVersion)"; [ "${macv%%.*}" -ge 14 ] || { echo "macOS 14 이상이 필요하다(torch 2.15 휠, 현재 $macv)" >&2; exit 1; }
+    command -v git >/dev/null || { echo "git 이 없다: xcode-select --install" >&2; exit 1; }
+    [ "$TORCH" = "auto" ] || [ "$TORCH" = "mps" ] || warn "macOS 에서는 --torch $TORCH 를 무시하고 mps 빌드를 쓴다."
+    TORCH="mps"
+else
+    [ "$(uname -m)" = "x86_64" ] || { echo "x86_64 만 지원한다 (현재 $(uname -m))" >&2; exit 1; }
+    grep -q 'VERSION_ID="24.04"' /etc/os-release 2>/dev/null || warn "Ubuntu 24.04 가 아니다. 계속 진행한다."
+    command -v git >/dev/null || { echo "git 이 없다: sudo apt-get install -y git" >&2; exit 1; }
+fi
+# git-lfs 필터가 전역 설정에 있는데 git-lfs 가 없으면 LeRobot 클론이 실패한다. LFS 파일(테스트 자료)은 받지 않는다.
+NOLFS=(-c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.clean= -c filter.lfs.required=false)
 export GIT_LFS_SKIP_SMUDGE=1
-mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$WS/logs"
 
-MODE=install
-for a in "$@"; do
-  case "$a" in
-    --repair) MODE=repair ;;
-    --reset-venv) RESET_VENV=1 ;;
-    --relock) MODE=relock ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
-    *) echo "알 수 없는 옵션: $a" >&2; exit 2 ;;
-  esac
+# ---- 1) conda ----
+CONDA=""
+for c in "${CONDA_EXE:-}" "$HOME/miniforge3/bin/conda" "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then CONDA="$c"; break; fi
 done
-RESET_VENV="${RESET_VENV:-0}"
-
-log() { printf '[install] %s\n' "$*"; }
-die() { printf '[install][FAIL] %s\n' "$*" >&2; exit 1; }
-
-# lock/lerobot.env를 source하지 않고 KEY=VALUE만 읽는다.
-envget() {
-  local v
-  v="$(grep -E "^$1=" "$WS/lock/lerobot.env" | tail -n1 | cut -d= -f2-)"
-  [[ -n "$v" ]] || die "lock/lerobot.env에 $1 값이 없습니다."
-  printf '%s' "$v"
-}
-LEROBOT_REPO="$(envget LEROBOT_REPO)"
-LEROBOT_SHA="$(envget LEROBOT_SHA)"
-LEROBOT_TAG="$(envget LEROBOT_TAG)"
-PYTHON_MINOR="$(envget PYTHON_MINOR)"
-UV_VERSION="$(envget UV_VERSION)"
-UV_ASSET="$(envget UV_ASSET)"
-UV_SHA256="$(envget UV_SHA256)"
-UV="$WS/.tools/uv/uv"
-
-# 설치 중 필요한 최소 여유 공간(MB). docs/CURRENT_STATE.md의 실측값(venv+캐시+checkout)에 여유를 더한 값.
-REQUIRED_FREE_MB="${SO101_REQUIRED_FREE_MB:-3000}"
-
-# ---- 0. 사전 점검 ----
-log "작업공간: $WS"
-[[ "$(uname -s)" == Linux ]] || die "Linux만 지원합니다."
-[[ "$(uname -m)" == x86_64 ]] || die "lock/uv.lock은 x86_64 전용입니다(현재 $(uname -m))."
-if [[ -r /etc/os-release ]]; then
-  . /etc/os-release
-  [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || log "경고: Ubuntu 24.04 외 환경입니다(${PRETTY_NAME:-unknown}). 계속 진행합니다."
-fi
-for f in "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml; do
-  [[ -e "$f" ]] && log "경고: uv 사용자/시스템 설정 $f 이 있습니다. 인덱스 등 설정이 lock 설치에 섞이지 않는지 확인하세요."
-done
-for c in git curl tar sha256sum df; do command -v "$c" >/dev/null || die "필수 명령 '$c'이(가) 없습니다."; done
-PYSYS="$(command -v "python$PYTHON_MINOR" || true)"
-[[ -n "$PYSYS" ]] || die "python$PYTHON_MINOR이 없습니다. Ubuntu 24.04 기본 패키지입니다: sudo apt install python$PYTHON_MINOR"
-avail_mb="$(df -Pm "$WS" | awk 'NR==2{print $4}')"
-log "여유 공간: ${avail_mb} MB ($(df -P "$WS" | awk 'NR==2{print $6}'))"
-if [[ ! -x "$WS/.venv/bin/python" && "$avail_mb" -lt "$REQUIRED_FREE_MB" ]]; then
-  die "여유 공간이 ${REQUIRED_FREE_MB} MB보다 적습니다. 공간을 확보하거나 여유 있는 파일시스템에 작업공간을 두세요."
-fi
-
-# ---- 1. uv 고정 바이너리 ----
-uv_ok() { [[ -x "$UV" ]] && [[ "$("$UV" --version 2>/dev/null | awk '{print $2}')" == "$UV_VERSION" ]]; }
-if uv_ok; then
-  log "uv $UV_VERSION 재사용"
-else
-  log "uv $UV_VERSION 내려받기(체크섬 검증)"
-  dl="$TMPDIR/dl"; mkdir -p "$dl"
-  curl -fsSL --retry 3 -o "$dl/$UV_ASSET" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_ASSET" \
-    || die "uv 다운로드 실패. 네트워크 확인 후 다시 실행하세요."
-  echo "$UV_SHA256  $dl/$UV_ASSET" | sha256sum -c --quiet - || die "uv 체크섬 불일치. 파일을 사용하지 않습니다: $dl/$UV_ASSET"
-  rm -rf "$WS/.tools/uv.new"; mkdir -p "$WS/.tools/uv.new"
-  tar -xzf "$dl/$UV_ASSET" -C "$WS/.tools/uv.new" --strip-components=1
-  if [[ -e "$WS/.tools/uv" ]]; then mv "$WS/.tools/uv" "$WS/.tools/uv.old-$(date +%Y%m%d_%H%M%S)"; fi
-  mv "$WS/.tools/uv.new" "$WS/.tools/uv"
-  uv_ok || die "uv 설치 확인 실패"
-fi
-
-# ---- 2. 공식 LeRobot 고정 SHA checkout(원본 참조·설치본 동일성 검증용) ----
-EXT="$WS/external/lerobot"
-if [[ -d "$EXT/.git" ]]; then
-  head_sha="$(git -C "$EXT" rev-parse HEAD 2>/dev/null || echo none)"
-  dirty="$(git -C "$EXT" status --porcelain 2>/dev/null | head -n1)"
-  if [[ "$head_sha" == "$LEROBOT_SHA" && -z "$dirty" ]]; then
-    log "external/lerobot @ $LEROBOT_SHA 재사용"
-  elif [[ -n "$dirty" ]]; then
-    die "external/lerobot에 수정된 파일이 있습니다. 덮어쓰지 않습니다. 'git -C external/lerobot status'로 확인하세요."
-  else
-    log "external/lerobot이 $head_sha에 있습니다. 수정 사항이 없으므로 $LEROBOT_SHA로 전환합니다."
-    git -C "$EXT" fetch -q origin "$LEROBOT_SHA" || die "fetch 실패. 네트워크 확인 후 다시 실행하세요."
-    git -C "$EXT" -c advice.detachedHead=false checkout -q --detach "$LEROBOT_SHA"
-  fi
-elif [[ -e "$EXT" ]]; then
-  die "$EXT가 git checkout이 아닙니다. 내용을 확인하고 직접 옮긴 뒤 다시 실행하세요(자동 삭제하지 않음)."
-else
-  log "LeRobot $LEROBOT_TAG($LEROBOT_SHA) 받기"
-  mkdir -p "$WS/external"
-  rm -rf "$EXT.partial"   # 이전 실행이 남긴 이 설치기 전용 임시 폴더
-  git clone -q --filter=blob:none --no-checkout "$LEROBOT_REPO" "$EXT.partial" || die "clone 실패. 다시 실행하세요."
-  git -C "$EXT.partial" -c advice.detachedHead=false checkout -q --detach "$LEROBOT_SHA" || die "checkout 실패"
-  mv "$EXT.partial" "$EXT"
-fi
-[[ "$(git -C "$EXT" rev-parse HEAD)" == "$LEROBOT_SHA" ]] || die "external/lerobot SHA 불일치"
-tag_sha="$(git -C "$EXT" rev-parse "refs/tags/$LEROBOT_TAG^{commit}" 2>/dev/null || true)"
-[[ -z "$tag_sha" || "$tag_sha" == "$LEROBOT_SHA" ]] || die "태그 $LEROBOT_TAG($tag_sha)가 고정 SHA와 다릅니다."
-
-# ---- 3. (유지보수) lock 재해결 ----
-if [[ "$MODE" == relock ]]; then
-  log "[relock] lock/uv.lock 재해결"
-  "$UV" lock --project lock --python "$PYTHON_MINOR"
-  log "[relock] 공식 uv.lock과 비교"
-  "$PYSYS" "$WS/tools/lock_tools.py" diff "$EXT/uv.lock" lock/uv.lock
-  if grep -nE 'path = |directory = |editable = |file://|/home/|/mnt/' lock/uv.lock; then
-    die "lock/uv.lock에 로컬 경로가 들어 있습니다."
-  fi
-  "$PYSYS" - "$WS/lock/uv.lock" <<'EOF'
-import sys, tomllib
-d = tomllib.load(open(sys.argv[1], "rb"))
-bad, sdist_only = [], []
-for p in d["package"]:
-    if p["name"] == "so101-env":
-        continue
-    files = p.get("wheels", []) + ([p["sdist"]] if "sdist" in p else [])
-    if any("hash" not in f for f in files):
-        bad.append(p["name"])
-    if not p.get("wheels"):
-        sdist_only.append(p["name"])
-print("[relock] 휠 없는 패키지(소스 빌드):", sdist_only)
-if bad:
-    sys.exit(f"[relock] 해시 없는 항목: {bad}")
-if set(sdist_only) - {"feetech-servo-sdk"}:
-    sys.exit("[relock] feetech-servo-sdk 외에 소스 빌드가 필요한 패키지가 생겼습니다. build-constraint를 검토하세요.")
-EOF
-fi
-
-# ---- 4. venv ----
-if [[ -e "$WS/.venv" ]]; then
-  vpy="$WS/.venv/bin/python"
-  vver="$("$vpy" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo none)"
-  if [[ "$vver" != "$PYTHON_MINOR" ]]; then
-    if [[ "$RESET_VENV" == 1 ]]; then
-      bk="$WS/.venv.broken-$(date +%Y%m%d_%H%M%S)"
-      log ".venv(Python $vver)을 $bk로 옮깁니다."
-      mv "$WS/.venv" "$bk"
+if [ -z "$CONDA" ]; then
+    say "[1/6] Miniforge 설치 → ~/miniforge3"
+    tmp="$(mktemp -d)"
+    if [ "$OS" = "Darwin" ]; then
+        # macOS: 고정 버전 + sha256 확인
+        url="https://github.com/conda-forge/miniforge/releases/download/26.7.2-1/Miniforge3-26.7.2-1-MacOSX-arm64.sh"
+        curl -fsSL -o "$tmp/mf.sh" "$url"
+        [ "$(shasum -a 256 "$tmp/mf.sh" | awk '{print $1}')" = "8ed41cb5b9eef81fea751870cfc3b6e67ab5e03fa5e5195ec41d3c36e06c853d" ] \
+            || { rm -rf "$tmp"; echo "Miniforge sha256 불일치" >&2; exit 1; }
     else
-      die ".venv의 Python이 $vver입니다($PYTHON_MINOR 필요). --reset-venv로 옮기고 새로 만들 수 있습니다."
+        url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+        if command -v wget >/dev/null; then wget -q -O "$tmp/mf.sh" "$url"; else curl -fsSL -o "$tmp/mf.sh" "$url"; fi
     fi
-  fi
-fi
-if [[ ! -e "$WS/.venv" ]]; then
-  log ".venv 생성(시스템 python$PYTHON_MINOR)"
-  "$UV" venv --quiet --python "$PYSYS" "$WS/.venv"
-fi
-
-# ---- 5. lock 그대로 동기화(재해결 없음, lock에 없는 패키지 제거, 누락·버전 차이 복구) ----
-sync_args=(sync --project lock --locked --python "$WS/.venv/bin/python")
-[[ "$MODE" == repair ]] && sync_args+=(--reinstall --no-cache)
-if "$UV" sync --project lock --locked --python "$WS/.venv/bin/python" --check >/dev/null 2>&1 && [[ "$MODE" != repair ]]; then
-  log "패키지 상태가 lock과 일치 → 재사용"
+    bash "$tmp/mf.sh" -b -p "$HOME/miniforge3"
+    rm -rf "$tmp"
+    CONDA="$HOME/miniforge3/bin/conda"
 else
-  log "uv sync --locked 실행"
-  "$UV" "${sync_args[@]}" || die "의존성 설치 실패. 네트워크 확인 후 다시 실행하세요(이미 받은 파일은 .cache/uv에서 재사용)."
+    say "[1/6] conda: $CONDA"
 fi
-"$UV" sync --project lock --locked --python "$WS/.venv/bin/python" --check >/dev/null || die "설치 후에도 환경이 lock과 다릅니다."
-"$UV" pip check --python "$WS/.venv/bin/python" || die "의존성 불일치(uv pip check)"
+PY="$("$CONDA" info --base)/envs/$ENV_NAME/bin/python"
 
-# ---- 6. 실제 상태 검증(소프트웨어 점검) 후 stamp 기록 ----
-log "소프트웨어 점검(scripts/so101 doctor --scope software)"
-set +e
-SO101_INSTALLING=1 "$WS/scripts/so101" doctor --scope software
-rc=$?
-set -e
-if [[ $rc -ne 0 && $rc -ne 2 ]]; then
-  die "소프트웨어 점검 실패. 위 FAIL 항목을 확인하세요. 파일 손상이 의심되면 --repair로 다시 실행하세요."
+# ---- 2) torch 빌드 선택 ----
+if [ "$TORCH" = "auto" ]; then
+    TORCH="cu13"
+    if command -v nvidia-smi >/dev/null; then
+        drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
+        if [ -n "$drv" ] && [ "$(printf '%s\n' "$drv" 580.65 | sort -V | head -1)" != "580.65" ]; then TORCH="cu128"; fi
+        echo "NVIDIA 드라이버: ${drv:-?}"
+    else
+        echo "NVIDIA GPU 없음 → CPU 로 동작(학습은 매우 느림)"
+    fi
 fi
-"$WS/.venv/bin/python" - "$WS" "$LEROBOT_SHA" "$UV_VERSION" <<'EOF'
-import hashlib, json, sys, time, pathlib, platform
-ws, sha, uvv = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-h = lambda p: hashlib.sha256((ws / p).read_bytes()).hexdigest()
-stamp = {
-    "lerobot_sha": sha,
-    "uv_version": uvv,
-    "python": platform.python_version(),
-    "uv_lock_sha256": h("lock/uv.lock"),
-    "pyproject_sha256": h("lock/pyproject.toml"),
-    "lerobot_env_sha256": h("lock/lerobot.env"),
-    "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-}
-(ws / ".venv/so101_install_stamp.json").write_text(json.dumps(stamp, indent=2) + "\n")
-EOF
-log "완료. 다음: scripts/so101 doctor --scope software (상세), 실기는 README의 순서를 따르세요."
+# TORCH_PKGS 는 TORCH_INDEX 에서, torchcodec 은 항상 PyPI 에서 받는다
+# (cu128 인덱스의 torchcodec 은 NVIDIA NPP 라이브러리가 따로 필요해 영상 디코딩이 pyav 로 떨어진다)
+EXTRA_CONDA=()
+case "$TORCH" in
+    mps)   TORCH_PKGS=(torch==2.15.0 torchvision==0.29.2); CODEC=torchcodec==0.17.0; TORCH_INDEX=(); FFMPEG="9.0.2"
+           EXTRA_CONDA=(bash=5.3) ;;
+    cu13)  TORCH_PKGS=(torch==2.15.0 torchvision==0.29.2); CODEC=torchcodec==0.17.0; TORCH_INDEX=(); FFMPEG="9.0.2" ;;
+    cu128) TORCH_PKGS=(torch==2.11.0 torchvision==0.26.0); CODEC=torchcodec==0.11.1
+           TORCH_INDEX=(--index-url https://download.pytorch.org/whl/cu128); FFMPEG="8.1.1" ;;
+    *) echo "--torch 는 auto, cu13, cu128 중 하나(macOS 는 mps)" >&2; exit 1 ;;
+esac
+say "[2/6] torch 빌드: $TORCH (${TORCH_PKGS[*]} $CODEC), ffmpeg $FFMPEG"
+
+# ---- 3) conda 환경 ----
+if [ ! -x "$PY" ]; then
+    say "[3/6] conda 환경 생성: $ENV_NAME"
+    "$CONDA" create -y -q -n "$ENV_NAME" -c conda-forge --override-channels "python=$PYTHON_VER" "ffmpeg=$FFMPEG" ${EXTRA_CONDA[@]+"${EXTRA_CONDA[@]}"}
+else
+    say "[3/6] conda 환경 있음: $ENV_NAME ($("$PY" --version))"
+    if [ ${#EXTRA_CONDA[@]} -gt 0 ] && [ ! -x "$(dirname "$PY")/bash" ]; then
+        "$CONDA" install -y -q -n "$ENV_NAME" -c conda-forge --override-channels "${EXTRA_CONDA[@]}"
+    fi
+fi
+
+# ---- 4) LeRobot 소스 ----
+want="${REF:-$LEROBOT_COMMIT}"
+if [ ! -d "$WS/lerobot/.git" ]; then
+    say "[4/6] LeRobot 클론 → lerobot/ ($want)"
+    git "${NOLFS[@]}" clone -q --filter=blob:none "$LEROBOT_URL" "$WS/lerobot"
+    git -C "$WS/lerobot" "${NOLFS[@]}" -c advice.detachedHead=false checkout -q "$want"
+elif [ -n "$REF" ]; then
+    say "[4/6] LeRobot → $REF"
+    git -C "$WS/lerobot" fetch -q origin
+    git -C "$WS/lerobot" "${NOLFS[@]}" -c advice.detachedHead=false checkout -q "$REF"
+else
+    cur="$(git -C "$WS/lerobot" rev-parse HEAD)"
+    say "[4/6] LeRobot 있음: ${cur:0:8}"
+    [ "$cur" = "$LEROBOT_COMMIT" ] || warn "검증한 커밋(${LEROBOT_COMMIT:0:8})과 다르다. 그대로 둔다(맞추려면 --lerobot-ref $LEROBOT_COMMIT)."
+fi
+
+# ---- 5) 파이썬 패키지 ----
+say "[5/6] 패키지 설치 (uv)"
+"$PY" -m pip install -q "uv==$UV_VER"
+UV="$(dirname "$PY")/uv"
+# macOS(APFS)는 clone: 캐시와 같은 파일을 디스크 추가 없이 복제한다
+if [ "$OS" = "Darwin" ]; then export UV_LINK_MODE=clone; else export UV_LINK_MODE=copy; fi
+"$UV" pip install --python "$PY" ${TORCH_INDEX[@]+"${TORCH_INDEX[@]}"} "${TORCH_PKGS[@]}"
+"$UV" pip install --python "$PY" -c "$WS/requirements/constraints.txt" -e "$WS/lerobot[$EXTRAS]" "${TORCH_PKGS[@]}" "$CODEC"
+
+# ---- 6) 간단 확인 ----
+say "[6/6] 확인"
+"$PY" -c "import lerobot, torch; print(f'lerobot {lerobot.__version__} | torch {torch.__version__} | CUDA 사용 가능: {torch.cuda.is_available()} | MPS 사용 가능: {torch.backends.mps.is_available()}')"
+
+if [ "$OS" != "Darwin" ] && [ $DIALOUT = 1 ] && ! id -nG | tr ' ' '\n' | grep -qx dialout; then
+    say "시리얼 포트 권한 (sudo)"
+    sudo usermod -aG dialout "$USER" && echo "추가됨. 로그아웃 후 다시 로그인(또는 재부팅)해야 적용된다."
+fi
+
+echo
+echo "설치 완료. 새 터미널마다:  source $WS/scripts/activate.sh"
+echo "다음: 이 PC 값(Hugging Face 계정·팔 포트·카메라) 자동 설정:  bash $WS/scripts/setup_local.sh"
+if [ "$OS" != "Darwin" ] && ! id -nG | tr ' ' '\n' | grep -qx dialout; then
+    echo "시리얼 포트 권한이 없다(팔 연결에 필요):  sudo usermod -aG dialout \$USER  → 로그아웃 후 다시 로그인"
+fi
+# --env-name 으로 기본과 다른 환경을 썼으면 이 PC 설정(config/so101.local.env)에 기록해 activate.sh 가 그 환경을 켜게 한다
+if [ "$ENV_NAME" != "$(sed -n 's/^SO101_ENV_NAME=//p' "$WS/config/so101.env")" ]; then
+    LOCAL="$WS/config/so101.local.env"
+    if [ -f "$LOCAL" ]; then grep -v '^SO101_ENV_NAME=' "$LOCAL" > "$LOCAL.tmp" || true; mv "$LOCAL.tmp" "$LOCAL"; fi
+    echo "SO101_ENV_NAME=$ENV_NAME" >> "$LOCAL"
+    echo "conda 환경 이름 $ENV_NAME 을 config/so101.local.env 에 기록했다."
+fi
